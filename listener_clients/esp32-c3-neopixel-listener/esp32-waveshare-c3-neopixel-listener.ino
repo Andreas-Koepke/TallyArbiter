@@ -59,6 +59,13 @@ String DeviceName = "Unassigned";
 
 //General Variables
 bool networkConnected = false;
+bool serverConnected = false;
+bool serverSetupPortalActive = false;
+bool restartRequested = false;
+
+#define BOOT_BUTTON_PIN 9 // BOOT button on the ESP32-C3 boards
+#define FACTORY_RESET_HOLD_MS 5000 // hold BOOT this long to clear WiFi and server settings
+#define SERVER_CONNECT_TIMEOUT_MS 20000 // time allowed to reach the Tally Arbiter server before opening the setup portal
 
 #define WHITE strip.Color(255, 255, 255)
 #define BLACK strip.Color(0, 0, 0)
@@ -66,6 +73,8 @@ bool networkConnected = false;
 
 WiFiManager wm; // global wm instance
 WiFiManagerParameter custom_field; // global param ( for non blocking w params )
+WiFiManagerParameter custom_taServer("taHostIP", "Tally Arbiter Server", "0.0.0.0", 40); // global so the setup portal can be reopened
+WiFiManagerParameter custom_taPort("taHostPort", "Port", "4455", 6);
 
 void setup() {
   Serial.begin(115200);
@@ -111,9 +120,12 @@ void setup() {
   preferences.end();
 
   delay(100); //wait 100ms before moving on
+  pinMode(BOOT_BUTTON_PIN, INPUT_PULLUP);
   connectToNetwork(); //starts Wifi connection
   while (!networkConnected) {
-    delay(200);
+    if (wm.process()) networkConnected = true; // services the setup portal until WiFi is configured
+    checkFactoryResetButton();
+    delay(10);
   }
 
   ArduinoOTA.setHostname(listenerDeviceName.c_str());
@@ -157,12 +169,14 @@ void setup() {
   logger("Tally extra initialised", "info");
   #endif
   connectToServer();
+  waitForServer();
 
 }
 
 void loop() {
   ArduinoOTA.handle();
   socket.loop();
+  checkFactoryResetButton();
 }
 
 void showDeviceInfo() {
@@ -192,8 +206,8 @@ void connectToNetwork() {
   //const char* custom_radio_str = "<br/><label for='taHostIP'>Tally Arbiter Server</label><input type='text' name='taHostIP'>";
   //new (&custom_field) WiFiManagerParameter(custom_radio_str); // custom html input
 
-  WiFiManagerParameter custom_taServer("taHostIP", "Tally Arbiter Server", tallyarbiter_host, 40);
-  WiFiManagerParameter custom_taPort("taHostPort", "Port", tallyarbiter_port, 6);
+  custom_taServer.setValue(tallyarbiter_host, 40);
+  custom_taPort.setValue(tallyarbiter_port, 6);
 
   wm.addParameter(&custom_taServer);
   wm.addParameter(&custom_taPort);
@@ -201,22 +215,22 @@ void connectToNetwork() {
   //wm.addParameter(&custom_field);
   wm.setSaveParamsCallback(saveParamCallback);
 
-  // custom menu via array or vector
-  std::vector<const char *> menu = {"wifi","param","info","sep","restart","exit"};
+  // custom menu via array or vector, Tally Arbiter settings first so they stay reachable
+  std::vector<const char *> menu = {"param","wifi","info","sep","restart","exit"};
   wm.setMenu(menu);
 
   // set dark theme
   wm.setClass("invert");
 
-  wm.setConfigPortalTimeout(120); // auto close configportal after n seconds
+  // non-blocking so the BOOT button and server checks keep running while the portal is open.
+  // The portal stays open until settings are saved (no timeout).
+  wm.setConfigPortalBlocking(false);
+  wm.setConfigPortalTimeout(0);
 
-  bool res;
-
-  res = wm.autoConnect(listenerDeviceName.c_str()); // AP name for setup
+  bool res = wm.autoConnect(listenerDeviceName.c_str()); // AP name for setup
 
   if (!res) {
-    logger("Failed to connect", "error");
-    // ESP.restart();
+    logger("No WiFi connection, setup portal open", "info");
   } else {
     //if you get here you have connected to the WiFi
     logger("connected...yay :)", "info");
@@ -268,8 +282,8 @@ void saveParamCallback() {
   String str_taHost = getParam("taHostIP");
   String str_taPort = getParam("taHostPort");
 
-  //str_taHost.toCharArray(tallyarbiter_host, 40);
-  //saveEEPROM();
+  str_taHost.toCharArray(tallyarbiter_host, 40);
+  str_taPort.toCharArray(tallyarbiter_port, 6);
   logger("Saving new TallyArbiter host", "info-quiet");
   logger(str_taHost, "info-quiet");
   preferences.begin("tally-arbiter", false);
@@ -277,6 +291,8 @@ void saveParamCallback() {
   preferences.putString("taPort", str_taPort);
   preferences.end();
 
+  // the server settings are only read at boot, so restart once saved from the server setup portal
+  if (serverSetupPortalActive) restartRequested = true;
 }
 
 void WiFiEvent(WiFiEvent_t event) {
@@ -313,13 +329,75 @@ void connectToServer() {
   socket.begin(tallyarbiter_host, atol(tallyarbiter_port));
 }
 
+void waitForServer() {
+  unsigned long startedAt = millis();
+  while (!serverConnected) {
+    if (millis() - startedAt > SERVER_CONNECT_TIMEOUT_MS) {
+      logger("Tally Arbiter server not reachable, opening setup portal", "error");
+      openServerSetupPortal();
+    }
+    ArduinoOTA.handle();
+    socket.loop();
+    checkFactoryResetButton();
+    delay(10);
+  }
+}
+
+void openServerSetupPortal() {
+  socket.disconnect();
+  serverSetupPortalActive = true;
+  wm.startConfigPortal(listenerDeviceName.c_str());
+  while (true) {
+    if (wm.process() || restartRequested) {
+      logger("Setup saved, restarting", "info");
+      delay(500);
+      ESP.restart();
+    }
+    checkFactoryResetButton();
+    delay(10);
+  }
+}
+
+void checkFactoryResetButton() {
+  static bool pressed = false;
+  static unsigned long pressedAt = 0;
+  if (digitalRead(BOOT_BUTTON_PIN) == HIGH) {
+    pressed = false;
+    return;
+  }
+  if (!pressed) {
+    pressed = true;
+    pressedAt = millis();
+    return;
+  }
+  if (millis() - pressedAt >= FACTORY_RESET_HOLD_MS) {
+    factoryReset();
+  }
+}
+
+void factoryReset() {
+  logger("Factory reset: clearing WiFi and Tally Arbiter server settings", "info");
+  setColor(YELLOW);
+  wm.resetSettings();
+  preferences.begin("tally-arbiter", false);
+  preferences.remove("taHost");
+  preferences.remove("taPort");
+  preferences.end();
+  delay(500);
+  ESP.restart();
+}
+
 void socket_event(socketIOmessageType_t type, uint8_t * payload, size_t length) {
   switch (type) {
     case sIOtype_CONNECT:
+      serverConnected = true;
       socket_Connected((char*)payload, length);
       break;
 
     case sIOtype_DISCONNECT:
+      serverConnected = false;
+      break;
+
     case sIOtype_ACK:
     case sIOtype_ERROR:
     case sIOtype_BINARY_EVENT:
