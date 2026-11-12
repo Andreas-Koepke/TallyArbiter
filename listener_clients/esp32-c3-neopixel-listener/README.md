@@ -32,9 +32,13 @@ You can monitor your ESP32's status via the Serial Monitor: set speed to 115 200
 1. Plug the device in a power source
 2. Wait for the boot animation to finish, if there is no saved AP it will startup an Access Point where you can configure one.
 3. Connect to the 'neopixel-xxxxxxxx' Access Point via phone and go to 192.168.4.1 (or wait a bit, a captive portal page should open).
-4. Set your Tally Arbiter server ip by going to _"Setup"_ page.
+4. Set your Tally Arbiter server ip by going to _"Setup"_ page (it is the first item in the menu).
 5. Go back, then go to the "Configure WiFi" page and set your WiFi credentials. The board should reboot.
 6. If the connection is successful a WiFi animation and a green tick mark will show. If not a red cross will be shown and you can reboot the device to try again.
+
+If the board connects to WiFi but cannot reach the Tally Arbiter server within 20 seconds, it opens the setup Access Point again and stays there until you save the settings.
+
+To clear the WiFi and Tally Arbiter server settings, hold the BOOT button for 5 seconds. The board then restarts into setup mode.
 
 ## Soldering (Optional)
 
